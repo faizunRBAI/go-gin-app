@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -162,7 +163,7 @@ const welcomeHTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="card">
-    <div class="badge">✅ Deployment Successful</div>
+    <div class="badge">&#x2705; Deployment Successful</div>
 
     <h1>go-gin-app</h1>
 
@@ -202,8 +203,8 @@ const welcomeHTML = `<!DOCTYPE html>
   </div>
 
   <footer>
-    Powered by <a href="#">Royal Bengal AI — UDAP</a> &nbsp;·&nbsp;
-    Remove this page by replacing <code>public/index.html</code> in your repo.
+    Powered by <a href="#">Royal Bengal AI &mdash; UDAP</a> &nbsp;&middot;&nbsp;
+    Remove this page by replacing the welcomeHTML in main.go.
   </footer>
 </body>
 </html>
@@ -211,7 +212,9 @@ const welcomeHTML = `<!DOCTYPE html>
 
 func main() {
 	port := os.Getenv("PORT")
-	if port == "" { port = "3000" }
+	if port == "" {
+		port = "3000"
+	}
 
 	r := gin.Default()
 
@@ -220,13 +223,21 @@ func main() {
 	})
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "uptime": time.Since(startTime).String()})
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
+			"uptime": time.Since(startTime).String(),
+		})
 	})
 
 	r.GET("/api/info", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"app": "go-gin", "version": "1.0.0", "db": "not-required"})
+		c.JSON(http.StatusOK, gin.H{
+			"app":     "go-gin-app",
+			"version": "1.0.0",
+		})
 	})
 
 	log.Printf("Listening on :%s", port)
-	r.Run(":" + port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }
