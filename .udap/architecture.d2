@@ -1,0 +1,14 @@
+# udap:meta cloud=aws region=us-east-1 target=eks
+
+user: Internet User { shape: person; udap-type: generic.user }
+ecr: ECR Registry { shape: rectangle; udap-type: aws.ecr }
+vpc: VPC (us-east-1) {
+  alb: Application Load Balancer { shape: rectangle; udap-type: aws.alb }
+  eks: EKS Cluster (k8s 1.33) { shape: rectangle; udap-type: aws.eks }
+  node_group: Managed Node Group (t3.medium x2) { shape: rectangle; udap-type: aws.ec2 }
+}
+
+user -> vpc.alb: HTTPS / HTTP
+vpc.alb -> vpc.eks: routes traffic
+vpc.eks -> vpc.node_group: schedules pods
+ecr -> vpc.eks: pulls image
