@@ -20,53 +20,10 @@ jobs:
     - name: Check formatting
       run: "unformatted=$(gofmt -l .)\nif [ -n \"$unformatted\" ]; then\n  echo \"\
         Files not gofmt'd: $unformatted\"\n  exit 1\nfi\n"
-  build_push:
-    runs-on: ubuntu-latest
-    needs:
-    - lint
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_REGION: us-east-1
-    timeout-minutes: 20
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-    - name: Download dependencies
-      run: go mod tidy
-    - name: Build binary (smoke test)
-      run: go build -o /dev/null .
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1
-    - id: ecr_login
-      name: Login to ECR
-      uses: aws-actions/amazon-ecr-login@v2
-    - id: image_tag
-      name: Set image tag
-      run: 'ECR_REGISTRY="${{ steps.ecr_login.outputs.registry }}"
-
-        IMAGE="${ECR_REGISTRY}/${{ secrets.PROJECT_NAME }}-app:${{ github.sha }}"
-
-        echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-
-        '
-    - name: Build and push Docker image
-      run: 'docker build -t "${{ steps.image_tag.outputs.image }}" .
-
-        docker push "${{ steps.image_tag.outputs.image }}"
-
-        '
   provision:
     runs-on: ubuntu-latest
     needs:
-    - build_push
+    - lint
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -89,10 +46,57 @@ jobs:
     - name: Terraform apply
       run: terraform apply -input=false -auto-approve
       working-directory: infra
-  configure:
+  build_push:
     runs-on: ubuntu-latest
     needs:
     - provision
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+    - name: Download dependencies
+      run: go mod tidy
+    - name: Build binary (smoke test)
+      run: go build -o /dev/null .
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Set up Terraform to read ECR URL
+      uses: hashicorp/setup-terraform@v3
+    - id: ecr
+      name: Read ECR URL from Terraform state
+      run: "terraform init -input=false -reconfigure \\\n  -backend-config=\"bucket=${{\
+        \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
+        \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\nECR_URL=$(terraform\
+        \ output -raw ecr_repository_url)\necho \"ecr_url=${ECR_URL}\" >> \"$GITHUB_OUTPUT\"\
+        \n"
+      working-directory: infra
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v2
+    - name: Build and push Docker image
+      run: 'IMAGE="${ECR_URL}:${{ github.sha }}"
+
+        docker build -t "${IMAGE}" .
+
+        docker push "${IMAGE}"
+
+        '
+      env:
+        ECR_URL: ${{ steps.ecr.outputs.ecr_url }}
+  configure:
+    runs-on: ubuntu-latest
+    needs:
+    - build_push
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -137,9 +141,7 @@ jobs:
     - name: Login to ECR
       uses: aws-actions/amazon-ecr-login@v2
     - name: Deploy Kubernetes manifests
-      run: 'ECR_URL="${{ steps.tf_out.outputs.ecr_url }}"
-
-        IMAGE="${ECR_URL}:${{ github.sha }}"
+      run: 'IMAGE="${ECR_URL}:${{ github.sha }}"
 
         kubectl apply -f k8s/namespace.yaml
 
@@ -151,6 +153,8 @@ jobs:
         kubectl rollout status deployment/go-gin-app -n go-gin-app --timeout=180s
 
         '
+      env:
+        ECR_URL: ${{ steps.tf_out.outputs.ecr_url }}
   verify:
     runs-on: ubuntu-latest
     needs:
@@ -168,19 +172,15 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: us-east-1
-    - id: get_alb
-      name: Get ALB endpoint
+    - name: Get ALB endpoint and health check
       run: "CLUSTER_NAME=\"${{ secrets.PROJECT_NAME }}-eks\"\naws eks update-kubeconfig\
         \ --region us-east-1 --name \"${CLUSTER_NAME}\"\necho \"Waiting for ALB DNS\
-        \ name...\"\nfor i in $(seq 1 20); do\n  ALB_HOST=$(kubectl get ingress go-gin-app\
-        \ -n go-gin-app \\\n    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'\
-        \ 2>/dev/null || true)\n  if [ -n \"$ALB_HOST\" ]; then\n    echo \"alb_host=${ALB_HOST}\"\
-        \ >> \"$GITHUB_OUTPUT\"\n    echo \"ALB ready: ${ALB_HOST}\"\n    break\n\
-        \  fi\n  echo \"Attempt ${i}/20 \u2014 waiting 15s...\"\n  sleep 15\ndone\n\
-        if [ -z \"$ALB_HOST\" ]; then\n  echo \"ERROR: ALB hostname not available\
-        \ after 5 minutes\"\n  exit 1\nfi\n"
-    - name: Health check with retries
-      run: "URL=\"http://${{ steps.get_alb.outputs.alb_host }}/health\"\necho \"Checking:\
-        \ ${URL}\"\ncurl --fail --retry 12 --retry-delay 15 --retry-all-errors \\\n\
-        \  --connect-timeout 10 --max-time 30 \"${URL}\"\necho \"\"\necho \"Health\
-        \ check passed!\"\n"
+        \ name...\"\nALB_HOST=\"\"\nfor i in $(seq 1 20); do\n  ALB_HOST=$(kubectl\
+        \ get ingress go-gin-app -n go-gin-app \\\n    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'\
+        \ 2>/dev/null || true)\n  if [ -n \"$ALB_HOST\" ]; then\n    echo \"ALB ready:\
+        \ ${ALB_HOST}\"\n    break\n  fi\n  echo \"Attempt ${i}/20 \u2014 waiting\
+        \ 15s...\"\n  sleep 15\ndone\nif [ -z \"$ALB_HOST\" ]; then\n  echo \"ERROR:\
+        \ ALB hostname not available after 5 minutes\"\n  exit 1\nfi\nURL=\"http://${ALB_HOST}/health\"\
+        \necho \"Checking: ${URL}\"\ncurl --fail --retry 12 --retry-delay 15 --retry-all-errors\
+        \ \\\n  --connect-timeout 10 --max-time 30 \"${URL}\"\necho \"\"\necho \"\
+        Health check passed!\"\n"
